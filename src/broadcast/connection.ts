@@ -1,7 +1,10 @@
-import { handshakeHandler, isHandshakeCommand, Syn } from "./handshake";
+import { handshakeHandler, isHandshakeCommand, Ping, Syn } from "./handshake";
+
+type ConnectionStatus = "disconnected" | "connected" | "connecting";
 
 type State = {
-  status: "disconnected" | "connected" | "connecting";
+  status: ConnectionStatus;
+  setStatus: (status: ConnectionStatus) => void;
   channel: BroadcastChannel;
   signal: AbortController;
   abort: () => void;
@@ -11,7 +14,11 @@ type State = {
 
 type NewConnectorArgs<T> = {
   handler: (ev: T) => void;
-  onConnected: () => void;
+  events?: {
+    onDisconnected?: VoidFunction;
+    onConnected?: VoidFunction;
+    onConnecting?: VoidFunction;
+  };
 };
 
 const sendSyn = (id: string, ch: BroadcastChannel) => {
@@ -23,11 +30,17 @@ const sendSyn = (id: string, ch: BroadcastChannel) => {
   ch.postMessage(syn);
 };
 
-export const newConnector = <T>({
-  handler,
-  onConnected,
-}: NewConnectorArgs<T>) => {
-  const state = createConnectionState();
+const sendPing = (id: string, ch: BroadcastChannel) => {
+  const ping: Ping = {
+    id: id,
+    type: "ping",
+  };
+
+  ch.postMessage(ping);
+};
+
+export const newConnector = <T>({ handler, events }: NewConnectorArgs<T>) => {
+  const state = createConnectionState(events ?? {});
 
   function eventHandler(ev: MessageEvent<any>) {
     console.log("Message recieved", ev.data);
@@ -38,11 +51,10 @@ export const newConnector = <T>({
         ev: ev.data,
         originId: state.id,
         onComplete: (id: string) => {
-          console.log("Connection established");
-          state.status = "connected";
+          state.setStatus("connected");
           state.recieverId = id;
-          console.log(state);
-          onConnected();
+          /** Starts ensuring the connection is kept alive */
+          startPingSubRoutine(state);
         },
         post: (s) => state.channel.postMessage(s),
       });
@@ -74,9 +86,10 @@ export const newConnector = <T>({
       state.channel.postMessage(msg);
     },
     connect: () => {
-      console.log("connecting");
-      state.status = "connecting";
-
+      if (state.status === "connected") {
+        throw new Error("Already connected");
+      }
+      state.setStatus("connecting");
       state.channel.addEventListener("message", eventHandler, {
         signal: state.signal.signal,
       });
@@ -95,15 +108,35 @@ type UserMessage<T> = {
   id: string;
 };
 
+type ConnectionEvents = {
+  onConnected?: VoidFunction;
+  onDisconnected?: VoidFunction;
+  onConnecting?: VoidFunction;
+};
+
 /** Lifecycle for connection state */
-function createConnectionState(): State {
+function createConnectionState(config: ConnectionEvents): State {
   const state: State = {
     status: "disconnected",
     channel: new BroadcastChannel("connector"),
     signal: new AbortController(),
+    setStatus: (newStatus) => {
+      state.status = newStatus;
+
+      switch (newStatus) {
+        case "connected":
+          config.onConnected && config.onConnected();
+
+        case "connecting":
+          config.onConnecting && config.onConnecting();
+
+        case "disconnected":
+          config.onDisconnected && config.onDisconnected();
+      }
+    },
     /** Do not destructure */
     abort: () => {
-      state.status = "disconnected";
+      state.setStatus("disconnected");
       state.signal.abort();
       state.signal = new AbortController();
       state.recieverId = null;
@@ -111,9 +144,50 @@ function createConnectionState(): State {
     id: (Math.random() * 16).toString(),
     recieverId: null,
   };
+
   return state;
 }
 
 function isUserMessage<T>(d: unknown): d is UserMessage<T> {
   return (d as UserMessage<T>).type === "user-message";
+}
+
+/**
+ * Subroutine for continously sending ping signals to keep the connection alive.
+ * Implementation is horrible and unstable due to heavily relying on timers
+ */
+function startPingSubRoutine(state: State) {
+  let skip = 1;
+
+  function handleAbort() {
+    state.abort();
+    clearInterval(recieverInterval);
+  }
+
+  state.channel.addEventListener(
+    "message",
+    (e) => {
+      if (isPingMessage(e.data) && e.data.id === state.recieverId) {
+        setTimeout(() => sendPing(state.id, state.channel), 100);
+        skip = 1;
+      }
+    },
+    { signal: state.signal.signal }
+  );
+
+  sendPing(state.id, state.channel);
+
+  const recieverInterval = setInterval(() => {
+    if (skip === 1) {
+      skip = 0;
+      return;
+    } else {
+      console.error("Peer disconnected");
+      handleAbort();
+    }
+  }, 5000);
+}
+
+function isPingMessage(d: unknown): d is Ping {
+  return (d as Ping)?.type === "ping";
 }

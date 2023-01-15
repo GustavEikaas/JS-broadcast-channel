@@ -28,6 +28,10 @@ export const Game = ({ name }: GameProps) => {
   const [opponentMoves, setOpponentMoves] = useState<number[]>([]);
   const [myMoves, setMyMoves] = useState<number[]>([]);
 
+  const [connectionState, setConnectionState] = useState<
+    "connected" | "disconnected" | "connecting"
+  >("disconnected");
+
   const [opponentName, setOpponentName] = useState<string | null>(null);
 
   const [send] = useState(() => {
@@ -40,9 +44,21 @@ export const Game = ({ name }: GameProps) => {
           setOpponentName(ev.name);
         }
       },
-      onConnected: () => {
-        console.log("Client connected");
-        s.send({ type: "start", name: name });
+      events: {
+        onConnected: () => {
+          console.log("Client onConnected called");
+          console.log("Client connected");
+          setConnectionState("connected");
+          s.send({ type: "start", name: name });
+        },
+        onConnecting: () => {
+          console.log("Client onConnecting called");
+          setConnectionState("connecting");
+        },
+        onDisconnected: () => {
+          console.log("Client onDisconnected called");
+          setConnectionState("disconnected");
+        },
       },
     });
     s.connect();
@@ -56,6 +72,7 @@ export const Game = ({ name }: GameProps) => {
     <StyledGameRoot>
       <div>
         <div>
+          {connectionState}
           <div>
             {name} is playing as: {icon}
           </div>
